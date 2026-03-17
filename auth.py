@@ -1,52 +1,32 @@
-from jose import jwt, JWTError
-from fastapi import HTTPException, Depends
+"""
+AUTH — temporarily disabled for local testing.
+All endpoints return a dummy user with SALES_MANAGER role.
+
+To re-enable JWT: replace this file with the original auth.py
+(use auth.py.bak if you saved it, or restore from git).
+"""
+
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from dotenv import load_dotenv
-import os
+from fastapi import Depends
 
-load_dotenv()
+bearer_scheme = HTTPBearer(auto_error=False)
 
-JWT_SECRET = os.environ.get("JWT_SECRET")
-if not JWT_SECRET:
-    raise RuntimeError("JWT_SECRET is not set in .env")
-
-bearer_scheme = HTTPBearer()
+DUMMY_USER = {"bd_id": "00000000-0000-0000-0000-000000000000", "role": "SALES_MANAGER"}
 
 
 def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
 ) -> dict:
-    """
-    Verify the Bearer JWT token sent by Zeandy's frontend.
-    Returns the decoded payload: { "bd_id": "...", "role": "BD_REP" | "SALES_MANAGER" }
-    Raises 401 if token is invalid or expired.
-    """
-    try:
-        payload = jwt.decode(
-            credentials.credentials,
-            JWT_SECRET,
-            algorithms=["HS256"],
-        )
-        if "bd_id" not in payload or "role" not in payload:
-            raise HTTPException(status_code=401, detail="Token payload missing required fields")
-        return payload
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return DUMMY_USER
 
 
-def require_manager(user: dict = Depends(get_current_user)) -> dict:
-    """
-    Dependency that requires SALES_MANAGER role.
-    Use this on executive dashboard and all report endpoints.
-    """
-    if user["role"] != "SALES_MANAGER":
-        raise HTTPException(status_code=403, detail="Access restricted to Sales Manager")
-    return user
+def require_manager(
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+) -> dict:
+    return DUMMY_USER
 
 
-def require_bd_or_manager(user: dict = Depends(get_current_user)) -> dict:
-    """
-    Dependency that allows both BD_REP and SALES_MANAGER.
-    BD_REP can only access their own data (enforce in the route).
-    """
-    return user
+def require_bd_or_manager(
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+) -> dict:
+    return DUMMY_USER

@@ -2,6 +2,10 @@
 Executive Dashboard queries.
 All queries accept :year (int) and :quarter (int).
 Manager-only — enforced at the route level.
+
+Forecast definition:
+  sales_forecast = Closed Won revenue (this quarter) + Negotiation stage revenue (all open)
+  Stage percentages are labels only — no multiplication applied.
 """
 
 # ── Team KPIs ─────────────────────────────────────────────────────────────────
@@ -28,18 +32,19 @@ team_quota AS (
     WHERE t.period_type = 'QUARTERLY'
       AND b.role = 'BD_REP'
 ),
-forecast AS (
-    SELECT COALESCE(SUM(dp.weighted_value), 0) AS sales_forecast
-    FROM deal_projection dp
-    JOIN deal d ON d.id = dp.deal_id
+negotiation AS (
+    -- Forecast = Closed Won + Negotiation revenue (no weighting — stage % are labels only)
+    SELECT COALESCE(SUM(d.revenue), 0) AS negotiation_revenue
+    FROM deal d
     WHERE d.is_closed = false
+      AND d.stage_id  = (SELECT id FROM pipeline_stage WHERE name = 'Negotiation')
 )
 SELECT
-    cw.total_revenue::float                                        AS total_revenue,
-    tq.total_quota::float                                          AS total_quota,
-    f.sales_forecast::float                                        AS sales_forecast,
+    cw.total_revenue::float                                              AS total_revenue,
+    tq.total_quota::float                                                AS total_quota,
+    (cw.total_revenue + n.negotiation_revenue)::float                    AS sales_forecast,
     ROUND(cw.total_revenue / NULLIF(tq.total_quota, 0) * 100, 1)::float AS attainment_pct
-FROM closed_won cw, team_quota tq, forecast f;
+FROM closed_won cw, team_quota tq, negotiation n;
 """
 
 # ── Leaderboard ───────────────────────────────────────────────────────────────

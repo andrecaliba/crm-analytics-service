@@ -28,11 +28,13 @@ def weekly_forecast_snapshot():
     """
     Runs: every Sunday at midnight.
 
-    For each BD rep with open deals, inserts one forecast_snapshot row
-    capturing their total pipeline value and weighted forecast.
-    Also inserts one team-level row (bd_id = NULL).
+    For each BD rep, inserts one forecast_snapshot row capturing:
+      - total_pipeline_value: sum of revenue on all open deals
+      - total_weighted_value: same as pipeline (no weighting — stage % are labels only)
+      - deal_count: number of open deals
 
-    This powers the "forecast trend over time" chart.
+    Also inserts one team-level row (bd_id = NULL).
+    Powers the "pipeline trend over time" chart.
     """
     db = SessionLocal()
     try:
@@ -44,17 +46,15 @@ def weekly_forecast_snapshot():
                 "Run scripts/seed_dates.py to fix."
             )
 
-        # Per-BD snapshots
+        # Per-BD snapshots — query directly from deal, no deal_projection needed
         bd_rows = db.execute(text("""
             SELECT
-                dp.bd_id,
-                COALESCE(SUM(d.revenue), 0)         AS total_pipeline_value,
-                COALESCE(SUM(dp.weighted_value), 0)  AS total_weighted_value,
-                COUNT(d.id)                          AS deal_count
-            FROM deal_projection dp
-            JOIN deal d ON d.id = dp.deal_id
+                d.bd_id,
+                COALESCE(SUM(d.revenue), 0) AS total_pipeline_value,
+                COUNT(d.id)                 AS deal_count
+            FROM deal d
             WHERE d.is_closed = false
-            GROUP BY dp.bd_id
+            GROUP BY d.bd_id
         """)).fetchall()
 
         for row in bd_rows:
@@ -64,11 +64,10 @@ def weekly_forecast_snapshot():
                      total_weighted_value, deal_count, snapshot_date_id)
                 VALUES
                     (gen_random_uuid(), :bd_id, :pipeline,
-                     :weighted, :count, :date_id)
+                     :pipeline, :count, :date_id)
             """), {
                 "bd_id":    row.bd_id,
                 "pipeline": row.total_pipeline_value,
-                "weighted": row.total_weighted_value,
                 "count":    row.deal_count,
                 "date_id":  date_id,
             })
@@ -76,12 +75,10 @@ def weekly_forecast_snapshot():
         # Team-level snapshot (bd_id = NULL)
         team = db.execute(text("""
             SELECT
-                COALESCE(SUM(d.revenue), 0)         AS pipeline,
-                COALESCE(SUM(dp.weighted_value), 0)  AS weighted,
-                COUNT(d.id)                          AS cnt
-            FROM deal_projection dp
-            JOIN deal d ON d.id = dp.deal_id
-            WHERE d.is_closed = false
+                COALESCE(SUM(revenue), 0) AS pipeline,
+                COUNT(id)                 AS cnt
+            FROM deal
+            WHERE is_closed = false
         """)).fetchone()
 
         db.execute(text("""
@@ -90,10 +87,9 @@ def weekly_forecast_snapshot():
                  total_weighted_value, deal_count, snapshot_date_id)
             VALUES
                 (gen_random_uuid(), NULL, :pipeline,
-                 :weighted, :count, :date_id)
+                 :pipeline, :count, :date_id)
         """), {
             "pipeline": team.pipeline,
-            "weighted": team.weighted,
             "count":    team.cnt,
             "date_id":  date_id,
         })
@@ -116,7 +112,11 @@ def weekly_deal_snapshot():
     Runs: every Sunday at 00:30.
 
     For every currently open deal, inserts one deal_snapshot row
-    capturing its stage, probability, projected amount, and weighted value.
+    capturing its current stage and revenue at this point in time.
+
+    Stage percentages are labels only — no probability multiplication.
+    projected_amount = revenue (full contract value, no discount).
+    weighted_value   = same as revenue (no weighting applied).
 
     This allows historical reconstruction: "what did the pipeline look like
     4 weeks ago?" by filtering deal_snapshot on date_id.
@@ -131,15 +131,13 @@ def weekly_deal_snapshot():
                 "Run scripts/seed_dates.py to fix."
             )
 
+        # Query directly from deal — no deal_projection join needed
         open_deals = db.execute(text("""
             SELECT
-                d.id              AS deal_id,
+                d.id       AS deal_id,
                 d.stage_id,
-                dp.probability_pct,
-                dp.projected_amount,
-                dp.weighted_value
+                d.revenue  AS revenue
             FROM deal d
-            JOIN deal_projection dp ON dp.deal_id = d.id
             WHERE d.is_closed = false
         """)).fetchall()
 
@@ -150,14 +148,12 @@ def weekly_deal_snapshot():
                      projected_amount, weighted_value, date_id)
                 VALUES
                     (gen_random_uuid(), :deal_id, :stage_id,
-                     :prob, :projected, :weighted, :date_id)
+                     NULL, :revenue, :revenue, :date_id)
             """), {
-                "deal_id":   deal.deal_id,
-                "stage_id":  deal.stage_id,
-                "prob":      deal.probability_pct,
-                "projected": deal.projected_amount,
-                "weighted":  deal.weighted_value,
-                "date_id":   date_id,
+                "deal_id":  deal.deal_id,
+                "stage_id": deal.stage_id,
+                "revenue":  deal.revenue,
+                "date_id":  date_id,
             })
 
         db.commit()
