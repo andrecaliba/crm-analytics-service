@@ -1,0 +1,18 @@
+[project]
+name = "sales-crm-analytics"
+version = "0.1.0"
+description = "OLAP / analytics service for Sales CRM — FastAPI + SQLAlchemy"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "apscheduler==3.10.4",
+    "fastapi==0.115.5",
+    "openpyxl==3.1.5",
+    "pandas==2.2.3",
+    "psycopg2-binary==2.9.10",
+    "python-dotenv==1.0.1",
+    "python-jose[cryptography]==3.3.0",
+    "reportlab==4.2.5",
+    "sqlalchemy==2.0.36",
+    "uvicorn[standard]==0.32.1",
+]
