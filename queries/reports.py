@@ -16,6 +16,7 @@ SELECT
     )::float                            AS pct_of_total
 FROM pipeline_stage ps
 LEFT JOIN deal d ON d.stage_id = ps.id AND d.is_closed = false
+WHERE ps.name NOT IN ('Closed Won', 'Closed Lost')
 GROUP BY ps.id, ps.name
 ORDER BY ps.id;
 """
@@ -35,58 +36,44 @@ WITH quarter_range AS (
         make_date(:year, (:quarter - 1) * 3 + 1, 1)::timestamptz AS q_start,
         (make_date(:year, (:quarter - 1) * 3 + 1, 1)
             + INTERVAL '3 months')::timestamptz                   AS q_end
+),
+bd_quota AS (
+    SELECT bd_id, COALESCE(MAX(quota), 0) AS quota
+    FROM target
+    WHERE period_type = 'QUARTERLY'
+    GROUP BY bd_id
+),
+bd_actual AS (
+    SELECT
+        d.bd_id,
+        COALESCE(SUM(d.revenue), 0) AS actual
+    FROM deal d
+    JOIN pipeline_stage ps ON ps.id = d.stage_id
+    CROSS JOIN quarter_range qr
+    WHERE d.is_closed = true
+      AND ps.name = 'Closed Won'
+      AND d.closed_date >= qr.q_start
+      AND d.closed_date <  qr.q_end
+    GROUP BY d.bd_id
 )
 SELECT
     b.id                                                                AS bd_id,
     b.first_name || ' ' || b.last_name                                  AS name,
-    COALESCE(MAX(t.quota), 0)::float                                    AS quota,
-    COALESCE(SUM(
-        CASE WHEN d.is_closed = true
-             AND ps.name = 'Closed Won'
-             AND d.closed_date >= qr.q_start
-             AND d.closed_date <  qr.q_end
-             THEN d.revenue ELSE 0 END
-    ), 0)::float                                                        AS actual,
+    COALESCE(q.quota, 0)::float                                         AS quota,
+    COALESCE(a.actual, 0)::float                                        AS actual,
     ROUND(
-        COALESCE(SUM(
-            CASE WHEN d.is_closed = true
-                 AND ps.name = 'Closed Won'
-                 AND d.closed_date >= qr.q_start
-                 AND d.closed_date <  qr.q_end
-                 THEN d.revenue ELSE 0 END
-        ), 0) / NULLIF(COALESCE(MAX(t.quota), 0), 0) * 100, 1
+        COALESCE(a.actual, 0) / NULLIF(COALESCE(q.quota, 0), 0) * 100, 1
     )::float                                                            AS attainment_pct,
-    (COALESCE(SUM(
-        CASE WHEN d.is_closed = true
-             AND ps.name = 'Closed Won'
-             AND d.closed_date >= qr.q_start
-             AND d.closed_date <  qr.q_end
-             THEN d.revenue ELSE 0 END
-    ), 0) - COALESCE(MAX(t.quota), 0))::float                          AS variance,
+    (COALESCE(a.actual, 0) - COALESCE(q.quota, 0))::float               AS variance,
     CASE
-        WHEN COALESCE(SUM(
-            CASE WHEN d.is_closed = true
-                 AND ps.name = 'Closed Won'
-                 AND d.closed_date >= qr.q_start
-                 AND d.closed_date <  qr.q_end
-                 THEN d.revenue ELSE 0 END
-        ), 0) >= COALESCE(MAX(t.quota), 0) THEN 'Exceeded'
-        WHEN COALESCE(SUM(
-            CASE WHEN d.is_closed = true
-                 AND ps.name = 'Closed Won'
-                 AND d.closed_date >= qr.q_start
-                 AND d.closed_date <  qr.q_end
-                 THEN d.revenue ELSE 0 END
-        ), 0) >= COALESCE(MAX(t.quota), 0) * 0.8 THEN 'On Track'
+        WHEN COALESCE(a.actual, 0) >= COALESCE(q.quota, 0)             THEN 'Exceeded'
+        WHEN COALESCE(a.actual, 0) >= COALESCE(q.quota, 0) * 0.8       THEN 'On Track'
         ELSE 'Behind'
     END                                                                 AS status
 FROM bd b
-CROSS JOIN quarter_range qr
-LEFT JOIN deal d          ON d.bd_id    = b.id
-LEFT JOIN pipeline_stage ps ON ps.id   = d.stage_id
-LEFT JOIN target t        ON t.bd_id   = b.id AND t.period_type = 'QUARTERLY'
+LEFT JOIN bd_quota  q ON q.bd_id = b.id
+LEFT JOIN bd_actual a ON a.bd_id = b.id
 WHERE b.role = 'BD_REP'
-GROUP BY b.id, b.first_name, b.last_name, qr.q_start, qr.q_end
 ORDER BY actual DESC;
 """
 
@@ -98,21 +85,23 @@ WITH quarter_range AS (
             + INTERVAL '3 months')::timestamptz                   AS q_end
 )
 SELECT
-    COALESCE(SUM(t.quota), 0)::float AS team_quota,
-    COALESCE(SUM(
-        CASE WHEN d.is_closed = true
-             AND ps.name = 'Closed Won'
-             AND d.closed_date >= qr.q_start
-             AND d.closed_date <  qr.q_end
-             THEN d.revenue ELSE 0 END
-    ), 0)::float                     AS team_actual
-FROM target t
-JOIN bd b ON b.id = t.bd_id
-CROSS JOIN quarter_range qr
-LEFT JOIN deal d          ON d.bd_id    = b.id
-LEFT JOIN pipeline_stage ps ON ps.id   = d.stage_id
-WHERE t.period_type = 'QUARTERLY'
-  AND b.role = 'BD_REP';
+    (
+        SELECT COALESCE(SUM(t.quota), 0)
+        FROM target t
+        JOIN bd b ON b.id = t.bd_id
+        WHERE t.period_type = 'QUARTERLY' AND b.role = 'BD_REP'
+    )::float AS team_quota,
+    (
+        SELECT COALESCE(SUM(d.revenue), 0)
+        FROM deal d
+        JOIN pipeline_stage ps ON ps.id = d.stage_id
+        CROSS JOIN quarter_range qr
+        WHERE d.is_closed = true
+          AND ps.name = 'Closed Won'
+          AND d.closed_date >= qr.q_start
+          AND d.closed_date <  qr.q_end
+    )::float AS team_actual
+FROM quarter_range;
 """
 
 # ── Loss analysis ─────────────────────────────────────────────────────────────
