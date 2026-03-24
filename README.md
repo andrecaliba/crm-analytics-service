@@ -10,8 +10,8 @@ aggregated metrics to the frontend dashboards and report exports.
 
 - Python 3.11+ in WSL
 - [uv](https://docs.astral.sh/uv/) installed
-- PostgreSQL running locally (same instance as Zeandy's project)
-- Zeandy's project running — BD accounts and deal data must exist before testing
+- PostgreSQL running locally (same instance as CRM system's)
+- CRM system running — BD accounts and deal data must exist before testing
 
 Install uv if you don't have it:
 ```bash
@@ -55,12 +55,12 @@ cp .env.example .env
 Open `.env` and fill in:
 
 ```
-DATABASE_URL=postgresql://user:password@localhost:5432/sales-crm
+DATABASE_URL=postgresql://user:password@localhost:5432/[db-name]
 JWT_SECRET=your-jwt-secret-here
 ```
 
-These must **exactly match** the values in Zeandy's project `.env`.
-Ask Zeandy for both values if you don't have them.
+These must **exactly match** the values in CRM system `.env`.
+Ask the other dev for both values if you don't have them.
 
 ---
 
@@ -82,7 +82,7 @@ Done — seeded 1827 date rows (2024–2028)
 
 ### Step 2 — Seed targets (quotas)
 
-Make sure Zeandy has already created the BD accounts in the database first.
+Make sure the other dev has already created the BD accounts in the database first.
 
 ```bash
 python scripts/seed_targets.py
@@ -122,13 +122,13 @@ Open in your browser:
 To use the Swagger UI:
 1. Click **Authorize** (top right)
 2. Enter: `Bearer <your_jwt_token>`
-3. Get a JWT by calling Zeandy's `POST /api/auth/login` first
+3. Get a JWT by calling motia `POST /api/auth/login` first
 
 ---
 
 ## 5. Getting a JWT token for testing
 
-Zeandy's login endpoint:
+Motia's login endpoint:
 
 ```bash
 curl -s -X POST http://localhost:3000/api/auth/login \
@@ -147,7 +147,7 @@ Replace these variables at the top of your terminal session:
 
 ```bash
 TOKEN="paste_your_jwt_here"
-BD_ID="paste_a_bd_rep_uuid_here"   # get from Zeandy's DB or /api/deals response
+BD_ID="paste_a_bd_rep_uuid_here"   # get from CRM's DB or /api/deals response
 YEAR=2026
 QUARTER=1
 BASE=http://localhost:8001
@@ -349,7 +349,7 @@ SELECT COUNT(*), date_id FROM deal_snapshot GROUP BY date_id ORDER BY 2 DESC LIM
 |-------|-------|-----|
 | `RuntimeError: DATABASE_URL is not set` | Missing .env | Copy .env.example to .env and fill it in |
 | `connection refused` on DB | PostgreSQL not running | Start PostgreSQL: `sudo service postgresql start` |
-| `401 Unauthorized` on all requests | Token wrong or expired | Get a fresh token from Zeandy's login endpoint |
+| `401 Unauthorized` on all requests | Token wrong or expired | Get a fresh token from Motia's login endpoint |
 | `403 Forbidden` on executive endpoints | Using a BD_REP token | Use a SALES_MANAGER account to log in |
 | `404 BD not found` on BD dashboard | Wrong bd_id | Get a valid UUID from `SELECT id, first_name FROM bd` in your DB |
 | All quotas return 0 | seed_targets.py not run | `python scripts/seed_targets.py` |
@@ -390,12 +390,12 @@ sales-crm-analytics/
 ## 11. Deployment on Railway
 
 1. Push this repo to GitHub
-2. In Railway, open Zeandy's project → **Add Service** → **GitHub Repo** → select this repo
+2. In Railway, open CRM system project → **Add Service** → **GitHub Repo** → select this repo
 3. Set start command: `uvicorn main:app --host 0.0.0.0 --port 8001`
 4. Add environment variables:
-   - `DATABASE_URL` — the Railway PostgreSQL connection string (same as Zeandy's)
-   - `JWT_SECRET` — the same secret as Zeandy's service
-5. Railway will give you a public URL — share it with Zeandy to add to the frontend proxy config
+   - `DATABASE_URL` — the Railway PostgreSQL connection string (same as CRM system)
+   - `JWT_SECRET` — the same secret as CRM system
+5. Railway will give you a public URL — share it with the other dev to add to the frontend proxy config
 6. Run seed scripts once against Railway DB:
    ```bash
    railway run python scripts/seed_dates.py
