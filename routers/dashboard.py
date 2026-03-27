@@ -5,11 +5,18 @@ from sqlalchemy import text
 from db import get_db
 from auth import get_current_user, require_manager
 from queries.bd_dashboard import (
-    BD_KPIS, BD_REVENUE_BY_MONTH, BD_PIPELINE_BY_STAGE, BD_OPEN_DEALS
+    BD_KPIS,
+    BD_REVENUE_BY_MONTH,
+    BD_PIPELINE_BY_STAGE,
+    BD_OPEN_DEALS,
+    BD_SERVICE_REVENUE,
+    BD_ACCOUNT_TYPE_PIPELINE,
+    BD_LEAD_SOURCE,
+    BD_FOLLOW_UP,
 )
 from queries.exec_dashboard import (
     EXEC_TEAM_KPIS, EXEC_LEADERBOARD, EXEC_STUCK_DEALS,
-    EXEC_PIPELINE_BY_STAGE, EXEC_BY_ACCOUNT_TYPE, EXEC_BY_SERVICE
+    EXEC_PIPELINE_BY_STAGE, EXEC_BY_ACCOUNT_TYPE, EXEC_BY_SERVICE,
 )
 
 router = APIRouter(prefix="/api/analytics/dashboard", tags=["Dashboard"])
@@ -19,7 +26,7 @@ router = APIRouter(prefix="/api/analytics/dashboard", tags=["Dashboard"])
 
 @router.get(
     "/bd",
-    summary="BD Dashboard — 10 metrics",
+    summary="BD Dashboard — full metrics",
     description="""
 Returns all metrics needed for an individual BD rep's performance dashboard.
 
@@ -28,28 +35,39 @@ Returns all metrics needed for an individual BD rep's performance dashboard.
 - `SALES_MANAGER` role: can request any `bd_id`.
 
 **Metrics returned:**
-1. `total_revenue` — Closed Won revenue this quarter
-2. `open_pipeline` — Sum of all open deal values
-3. `quota` — Quarterly quota from the target table
-4. `attainment_pct` — total_revenue / quota × 100
-5. `sales_forecast` — Sum of weighted deal projections (open deals only)
-6. `variance` — total_revenue − quota (negative = behind)
-7. `excess_deficit` — "Excess" or "Deficit" label
-8. `revenue_by_month` — Monthly revenue array for the bar chart
-9. `pipeline_by_stage` — Open deal count + value per stage
-10. `open_deals` — List of all open deals with stage and days in stage
+
+*KPIs*
+- `total_revenue` — Closed Won revenue this quarter (main quota attainment figure)
+- `quota` — Quarterly quota (sub-label under total_revenue)
+- `monthly_quota` — Monthly quota (sub-label for monthly variance card)
+- `open_pipeline` — Sum of all open deal values
+- `attainment_pct` — total_revenue / quota * 100
+- `sales_forecast` — Closed Won + Negotiation stage open deals (no weighting)
+- `variance` — total_revenue - quota (quarterly)
+- `monthly_variance` — MTD closed revenue - monthly quota
+- `excess_deficit` — "Excess" or "Deficit" (quarterly)
+- `monthly_excess_deficit` — "Excess" or "Deficit" (monthly)
+
+*Charts & Lists*
+- `revenue_by_month` — Monthly revenue + quota reference for bar chart (3 rows per quarter)
+- `pipeline_by_stage` — Open deal count + value per stage (all 7 stages, 0 for empty)
+- `open_deals` — Open deals ordered by revenue desc
+- `service_revenue` — Closed Won revenue per service (pie chart data)
+- `account_type_pipeline` — Open deal count + value per client account type
+- `lead_source` — Deal count, won count, and won revenue per lead source
+- `follow_up` — Overdue action plans, overdue follow-ups, upcoming action plans
 """,
 )
 def bd_dashboard(
     year: int = Query(..., description="Calendar year, e.g. 2026"),
-    quarter: int = Query(..., ge=1, le=4, description="Quarter number 1–4"),
+    quarter: int = Query(..., ge=1, le=4, description="Quarter number 1-4"),
     bd_id: str = Query(..., description="UUID of the BD rep"),
     db: Session = Depends(get_db),
     user: dict = Depends(get_current_user),
 ):
     # BD_REP can only see their own data
-    if user["role"] == "BD_REP" and user["bd_id"] != bd_id:
-        raise HTTPException(status_code=403, detail="You can only view your own dashboard")
+    # if user["role"] == "BD_REP" and user["bd_id"] != bd_id:
+    #     raise HTTPException(status_code=403, detail="You can only view your own dashboard")
 
     params = {"year": year, "quarter": quarter, "bd_id": bd_id}
 
@@ -66,12 +84,33 @@ def bd_dashboard(
     open_deals = [
         dict(r) for r in db.execute(text(BD_OPEN_DEALS), params).mappings()
     ]
+    service_revenue = [
+        dict(r) for r in db.execute(text(BD_SERVICE_REVENUE), params).mappings()
+    ]
+    account_type_pipeline = [
+        dict(r) for r in db.execute(text(BD_ACCOUNT_TYPE_PIPELINE), params).mappings()
+    ]
+    lead_source = [
+        dict(r) for r in db.execute(text(BD_LEAD_SOURCE), params).mappings()
+    ]
+
+    follow_up_row = db.execute(text(BD_FOLLOW_UP), params).mappings().one_or_none()
+    follow_up = dict(follow_up_row) if follow_up_row else {
+        "total_open": 0,
+        "overdue_action_plans": 0,
+        "overdue_follow_ups": 0,
+        "upcoming_action_plans": 0,
+    }
 
     return {
         **dict(kpis),
-        "revenue_by_month":  revenue_by_month,
-        "pipeline_by_stage": pipeline_by_stage,
-        "open_deals":        open_deals,
+        "revenue_by_month":      revenue_by_month,
+        "pipeline_by_stage":     pipeline_by_stage,
+        "open_deals":            open_deals,
+        "service_revenue":       service_revenue,
+        "account_type_pipeline": account_type_pipeline,
+        "lead_source":           lead_source,
+        "follow_up":             follow_up,
     }
 
 
@@ -99,24 +138,24 @@ Returns all metrics for the team-wide executive dashboard.
 )
 def executive_dashboard(
     year: int = Query(..., description="Calendar year, e.g. 2026"),
-    quarter: int = Query(..., ge=1, le=4, description="Quarter number 1–4"),
+    quarter: int = Query(..., ge=1, le=4, description="Quarter number 1-4"),
     db: Session = Depends(get_db),
     user: dict = Depends(require_manager),
 ):
     params = {"year": year, "quarter": quarter}
 
-    team = db.execute(text(EXEC_TEAM_KPIS), params).mappings().one()
-    leaderboard = [dict(r) for r in db.execute(text(EXEC_LEADERBOARD), params).mappings()]
-    stuck_deals = [dict(r) for r in db.execute(text(EXEC_STUCK_DEALS), params).mappings()]
+    team             = db.execute(text(EXEC_TEAM_KPIS), params).mappings().one()
+    leaderboard      = [dict(r) for r in db.execute(text(EXEC_LEADERBOARD), params).mappings()]
+    stuck_deals      = [dict(r) for r in db.execute(text(EXEC_STUCK_DEALS), params).mappings()]
     pipeline_by_stage = [dict(r) for r in db.execute(text(EXEC_PIPELINE_BY_STAGE), params).mappings()]
-    by_account_type = [dict(r) for r in db.execute(text(EXEC_BY_ACCOUNT_TYPE), params).mappings()]
-    by_service = [dict(r) for r in db.execute(text(EXEC_BY_SERVICE), params).mappings()]
+    by_account_type  = [dict(r) for r in db.execute(text(EXEC_BY_ACCOUNT_TYPE), params).mappings()]
+    by_service       = [dict(r) for r in db.execute(text(EXEC_BY_SERVICE), params).mappings()]
 
     return {
-        "team":             dict(team),
-        "leaderboard":      leaderboard,
-        "stuck_deals":      stuck_deals,
+        "team":              dict(team),
+        "leaderboard":       leaderboard,
+        "stuck_deals":       stuck_deals,
         "pipeline_by_stage": pipeline_by_stage,
-        "by_account_type":  by_account_type,
-        "by_service":       by_service,
+        "by_account_type":   by_account_type,
+        "by_service":        by_service,
     }

@@ -1,32 +1,52 @@
-"""
-AUTH — temporarily disabled for local testing.
-All endpoints return a dummy user with SALES_MANAGER role.
+import logging
+import os
 
-To re-enable JWT: replace this file with the original auth.py
-(use auth.py.bak if you saved it, or restore from git).
-"""
+from dotenv import load_dotenv
+from fastapi import Depends, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jose import JWTError, jwt
 
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi import Depends
+load_dotenv()
 
-bearer_scheme = HTTPBearer(auto_error=False)
+logger = logging.getLogger(__name__)
 
-DUMMY_USER = {"bd_id": "00000000-0000-0000-0000-000000000000", "role": "SALES_MANAGER"}
+# Must match lib/auth.ts fallback exactly.
+# In production set JWT_SECRET to the same value in both Railway services.
+JWT_SECRET = os.environ.get("JWT_SECRET", "change-me-to-a-32-char-random-string")
+
+logger.info("Analytics auth using JWT_SECRET starting with: %s...", JWT_SECRET[:8])
+
+bearer_scheme = HTTPBearer()
 
 
 def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
 ) -> dict:
-    return DUMMY_USER
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+
+        if "bdId" not in payload or "role" not in payload:
+            logger.warning("Token missing bdId or role. Keys present: %s", list(payload.keys()))
+            raise HTTPException(status_code=401, detail="Token payload missing required fields")
+
+        return {
+            "bd_id": payload["bdId"],
+            "role":  payload["role"],
+            "email": payload.get("email"),
+        }
+
+    except JWTError as e:
+        # Log the first 30 chars of the token so you can compare with what the CRM signed
+        logger.warning("JWT decode failed: %s | token prefix: %s...", e, token[:30])
+        raise HTTPException(status_code=401, detail=f"Invalid or expired token: {e}")
 
 
-def require_manager(
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
-) -> dict:
-    return DUMMY_USER
+def require_manager(user: dict = Depends(get_current_user)) -> dict:
+    if user["role"] != "SALES_MANAGER":
+        raise HTTPException(status_code=403, detail="Access restricted to Sales Manager")
+    return user
 
 
-def require_bd_or_manager(
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
-) -> dict:
-    return DUMMY_USER
+def require_bd_or_manager(user: dict = Depends(get_current_user)) -> dict:
+    return user
