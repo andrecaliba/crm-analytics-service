@@ -336,3 +336,257 @@ WHERE d.is_closed   = true
   AND d.closed_date >= qr.q_start
   AND d.closed_date <  qr.q_end;
 """
+# ── Pipeline detail — per-stage enrichment ────────────────────────────────────
+# All queries accept optional :bd_id (NULL = all BDs).
+# Used by the Pipeline tab on the Executive Reports page.
+
+PIPELINE_BY_BD = """
+-- Who owns deals at each open pipeline stage (contributor breakdown).
+-- Scoped to deals whose start_date falls within the selected year/quarter.
+WITH quarter_range AS (
+    SELECT
+        make_date(:year, (:quarter - 1) * 3 + 1, 1)::timestamptz AS q_start,
+        (make_date(:year, (:quarter - 1) * 3 + 1, 1)
+            + INTERVAL '3 months')::timestamptz                   AS q_end
+)
+SELECT
+    ps.name                              AS stage_name,
+    b.first_name || ' ' || b.last_name  AS bd_name,
+    b.id                                 AS bd_id,
+    COUNT(d.id)::int                     AS deal_count,
+    COALESCE(SUM(d.revenue), 0)::float   AS total_value
+FROM pipeline_stage ps
+JOIN deal d ON d.stage_id = ps.id
+    AND d.is_closed = false
+    AND (:bd_id IS NULL OR d.bd_id::text = :bd_id)
+CROSS JOIN quarter_range qr
+JOIN bd b ON b.id = d.bd_id
+WHERE ps.name NOT IN ('Closed Won', 'Closed Lost')
+  AND d.start_date >= qr.q_start
+  AND d.start_date <  qr.q_end
+GROUP BY ps.id, ps.name, b.id, b.first_name, b.last_name
+ORDER BY ps.id, total_value DESC;
+"""
+
+PIPELINE_BY_SERVICE = """
+-- Services mix across the open pipeline, optionally filtered by BD and period.
+WITH quarter_range AS (
+    SELECT
+        make_date(:year, (:quarter - 1) * 3 + 1, 1)::timestamptz AS q_start,
+        (make_date(:year, (:quarter - 1) * 3 + 1, 1)
+            + INTERVAL '3 months')::timestamptz                   AS q_end
+)
+SELECT
+    ps.name                                    AS stage_name,
+    COALESCE(s.name, bun.name, 'Unassigned')  AS service_name,
+    COUNT(d.id)::int                           AS deal_count,
+    COALESCE(SUM(d.revenue), 0)::float         AS total_value
+FROM pipeline_stage ps
+JOIN deal d ON d.stage_id = ps.id
+    AND d.is_closed = false
+    AND (:bd_id IS NULL OR d.bd_id::text = :bd_id)
+CROSS JOIN quarter_range qr
+LEFT JOIN service s   ON s.id = d.service_id
+LEFT JOIN bundle  bun ON bun.id = d.bundle_id
+WHERE ps.name NOT IN ('Closed Won', 'Closed Lost')
+  AND d.start_date >= qr.q_start
+  AND d.start_date <  qr.q_end
+GROUP BY ps.id, ps.name, COALESCE(s.name, bun.name, 'Unassigned')
+ORDER BY ps.id, total_value DESC;
+"""
+
+PIPELINE_BY_ACCOUNT_TYPE = """
+-- Account/client type mix across the open pipeline, optionally filtered by BD and period.
+WITH quarter_range AS (
+    SELECT
+        make_date(:year, (:quarter - 1) * 3 + 1, 1)::timestamptz AS q_start,
+        (make_date(:year, (:quarter - 1) * 3 + 1, 1)
+            + INTERVAL '3 months')::timestamptz                   AS q_end
+)
+SELECT
+    ps.name                              AS stage_name,
+    INITCAP(c.account_type::text)        AS account_type,
+    COUNT(d.id)::int                     AS deal_count,
+    COALESCE(SUM(d.revenue), 0)::float   AS total_value
+FROM pipeline_stage ps
+JOIN deal d ON d.stage_id = ps.id
+    AND d.is_closed = false
+    AND (:bd_id IS NULL OR d.bd_id::text = :bd_id)
+CROSS JOIN quarter_range qr
+JOIN client c ON c.id = d.client_id
+WHERE ps.name NOT IN ('Closed Won', 'Closed Lost')
+  AND d.start_date >= qr.q_start
+  AND d.start_date <  qr.q_end
+GROUP BY ps.id, ps.name, INITCAP(c.account_type::text)
+ORDER BY ps.id, total_value DESC;
+"""
+
+PIPELINE_LEAD_SOURCE = """
+-- Lead source breakdown across open pipeline, optionally filtered by BD and period.
+WITH quarter_range AS (
+    SELECT
+        make_date(:year, (:quarter - 1) * 3 + 1, 1)::timestamptz AS q_start,
+        (make_date(:year, (:quarter - 1) * 3 + 1, 1)
+            + INTERVAL '3 months')::timestamptz                   AS q_end
+)
+SELECT
+    INITCAP(d.lead_source::text)         AS lead_source,
+    COUNT(d.id)::int                     AS deal_count,
+    COALESCE(SUM(d.revenue), 0)::float   AS total_value
+FROM deal d
+CROSS JOIN quarter_range qr
+WHERE d.is_closed = false
+  AND (:bd_id IS NULL OR d.bd_id::text = :bd_id)
+  AND d.start_date >= qr.q_start
+  AND d.start_date <  qr.q_end
+GROUP BY INITCAP(d.lead_source::text)
+ORDER BY total_value DESC;
+"""
+
+PIPELINE_STAGE_TOTALS = """
+-- Total value per open stage (for the stage selector value badges), scoped to period.
+WITH quarter_range AS (
+    SELECT
+        make_date(:year, (:quarter - 1) * 3 + 1, 1)::timestamptz AS q_start,
+        (make_date(:year, (:quarter - 1) * 3 + 1, 1)
+            + INTERVAL '3 months')::timestamptz                   AS q_end
+)
+SELECT
+    ps.name                              AS stage_name,
+    COUNT(d.id)::int                     AS deal_count,
+    COALESCE(SUM(d.revenue), 0)::float   AS total_value
+FROM pipeline_stage ps
+LEFT JOIN deal d ON d.stage_id = ps.id
+    AND d.is_closed = false
+    AND (:bd_id IS NULL OR d.bd_id::text = :bd_id)
+    AND d.start_date >= (SELECT q_start FROM quarter_range)
+    AND d.start_date <  (SELECT q_end   FROM quarter_range)
+WHERE ps.name NOT IN ('Closed Won', 'Closed Lost')
+GROUP BY ps.id, ps.name
+ORDER BY ps.id;
+"""
+
+# ── Service performance report ────────────────────────────────────────────────
+# Revenue, deal count, win rate, avg deal size, avg sales cycle per service.
+# Accepts :year and :quarter.
+
+SERVICE_PERFORMANCE = """
+WITH quarter_range AS (
+    SELECT
+        make_date(:year, (:quarter - 1) * 3 + 1, 1)::timestamptz AS q_start,
+        (make_date(:year, (:quarter - 1) * 3 + 1, 1)
+            + INTERVAL '3 months')::timestamptz                   AS q_end
+),
+all_services AS (
+    SELECT id, name FROM service
+),
+closed_deals AS (
+    SELECT
+        d.id,
+        d.revenue,
+        d.sales_cycle_days,
+        d.service_id,
+        ps.name AS stage_name
+    FROM deal d
+    JOIN pipeline_stage ps ON ps.id = d.stage_id
+    CROSS JOIN quarter_range qr
+    WHERE d.is_closed = true
+      AND d.closed_date >= qr.q_start
+      AND d.closed_date <  qr.q_end
+      AND d.service_id IS NOT NULL
+),
+open_deals AS (
+    SELECT
+        d.id,
+        d.revenue,
+        d.service_id
+    FROM deal d
+    CROSS JOIN quarter_range qr
+    WHERE d.is_closed = false
+      AND d.service_id IS NOT NULL
+      AND d.start_date >= qr.q_start
+      AND d.start_date <  qr.q_end
+)
+SELECT
+    s.name                                                                       AS service_name,
+    COUNT(CASE WHEN cd.stage_name = 'Closed Won'  THEN 1 END)::int             AS won_deals,
+    COUNT(CASE WHEN cd.stage_name = 'Closed Lost' THEN 1 END)::int             AS lost_deals,
+    COUNT(cd.id)::int                                                            AS closed_deals,
+    COALESCE(COUNT(od.id), 0)::int                                              AS open_deals,
+    COALESCE(SUM(CASE WHEN cd.stage_name = 'Closed Won' THEN cd.revenue END), 0)::float   AS won_revenue,
+    ROUND(
+        100.0 * COUNT(CASE WHEN cd.stage_name = 'Closed Won' THEN 1 END)
+        / NULLIF(COUNT(cd.id), 0), 1
+    )::float                                                                     AS win_rate,
+    ROUND(
+        COALESCE(AVG(CASE WHEN cd.stage_name = 'Closed Won' THEN cd.revenue END), 0), 0
+    )::float                                                                     AS avg_deal_size,
+    ROUND(
+        COALESCE(AVG(CASE WHEN cd.stage_name = 'Closed Won' THEN cd.sales_cycle_days END), 0), 1
+    )::float                                                                     AS avg_cycle_days
+FROM all_services s
+LEFT JOIN closed_deals cd ON cd.service_id = s.id
+LEFT JOIN open_deals   od ON od.service_id = s.id
+GROUP BY s.id, s.name
+ORDER BY won_revenue DESC;
+"""
+
+# ── Growth sandbox queries ────────────────────────────────────────────────────
+# Support month / quarter / year granularity with optional bd_id filter.
+# Each returns a series of { period_label, revenue } rows.
+
+GROWTH_BY_MONTH = """
+-- Closed Won revenue by calendar month for a given year, optional BD filter.
+SELECT
+    TO_CHAR(make_date(:year, m.n, 1), 'Mon YY') AS period_label,
+    m.n                                          AS period_order,
+    COALESCE(SUM(d.revenue), 0)::float           AS revenue
+FROM generate_series(1, 12) AS m(n)
+LEFT JOIN deal d ON EXTRACT(YEAR  FROM d.closed_date)::int = :year
+    AND EXTRACT(MONTH FROM d.closed_date)::int = m.n
+    AND d.is_closed = true
+    AND d.stage_id  = (SELECT id FROM pipeline_stage WHERE name = 'Closed Won')
+    AND (:bd_id IS NULL OR d.bd_id::text = :bd_id)
+GROUP BY m.n
+ORDER BY m.n;
+"""
+
+GROWTH_BY_QUARTER = """
+-- Closed Won revenue by quarter for a given year, optional BD filter.
+SELECT
+    'Q' || q.n || ' ' || :year            AS period_label,
+    q.n                                   AS period_order,
+    COALESCE(SUM(d.revenue), 0)::float    AS revenue
+FROM generate_series(1, 4) AS q(n)
+LEFT JOIN deal d ON EXTRACT(YEAR    FROM d.closed_date)::int = :year
+    AND EXTRACT(QUARTER FROM d.closed_date)::int = q.n
+    AND d.is_closed = true
+    AND d.stage_id  = (SELECT id FROM pipeline_stage WHERE name = 'Closed Won')
+    AND (:bd_id IS NULL OR d.bd_id::text = :bd_id)
+GROUP BY q.n
+ORDER BY q.n;
+"""
+
+GROWTH_BY_YEAR = """
+-- Closed Won revenue by year across a range, optional BD filter.
+-- Shows the last 5 years ending at :year.
+SELECT
+    y.yr::text                             AS period_label,
+    y.yr                                   AS period_order,
+    COALESCE(SUM(d.revenue), 0)::float     AS revenue
+FROM generate_series(:year - 4, :year) AS y(yr)
+LEFT JOIN deal d ON EXTRACT(YEAR FROM d.closed_date)::int = y.yr
+    AND d.is_closed = true
+    AND d.stage_id  = (SELECT id FROM pipeline_stage WHERE name = 'Closed Won')
+    AND (:bd_id IS NULL OR d.bd_id::text = :bd_id)
+GROUP BY y.yr
+ORDER BY y.yr;
+"""
+
+BD_LIST = """
+-- All active BD reps — for the BD filter dropdown.
+SELECT id, first_name || ' ' || last_name AS full_name, role
+FROM bd
+WHERE is_active = true
+ORDER BY first_name;
+"""
