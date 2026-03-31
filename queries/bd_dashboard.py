@@ -29,25 +29,23 @@ closed_won AS (
     FROM deal d
     CROSS JOIN quarter_range qr
     WHERE d.bd_id     = :bd_id
-      AND d.is_closed = true
       AND d.stage_id  = (SELECT id FROM pipeline_stage WHERE name = 'Closed Won')
-      AND d.closed_date >= qr.q_start
-      AND d.closed_date <  qr.q_end
+      AND COALESCE(d.start_date, d.closed_date, NOW()) < qr.q_end
+      AND COALESCE(d.due_date, d.start_date, d.closed_date, NOW()) >= qr.q_start
 ),
 closed_won_mtd AS (
     SELECT COALESCE(SUM(d.revenue), 0) AS mtd_revenue
     FROM deal d
     CROSS JOIN month_range mr
     WHERE d.bd_id     = :bd_id
-      AND d.is_closed = true
       AND d.stage_id  = (SELECT id FROM pipeline_stage WHERE name = 'Closed Won')
-      AND d.closed_date >= mr.m_start
-      AND d.closed_date <  mr.m_end
+      AND COALESCE(d.start_date, d.closed_date, NOW()) < mr.m_end
+      AND COALESCE(d.due_date, d.start_date, d.closed_date, NOW()) >= mr.m_start
 ),
 open_pipe AS (
-    SELECT COALESCE(SUM(revenue), 0) AS open_pipeline
-    FROM deal
-    WHERE bd_id = :bd_id AND is_closed = false
+    SELECT COALESCE(SUM(d.revenue), 0) AS open_pipeline
+    FROM deal d
+    WHERE d.bd_id = :bd_id AND d.is_closed = false
 ),
 quota_row AS (
     SELECT
@@ -57,7 +55,6 @@ quota_row AS (
     WHERE t.bd_id = :bd_id
 ),
 negotiation AS (
-    -- Forecast = Closed Won + Negotiation (stage % are labels only — full revenue used)
     SELECT COALESCE(SUM(d.revenue), 0) AS negotiation_revenue
     FROM deal d
     WHERE d.bd_id     = :bd_id
@@ -72,7 +69,7 @@ SELECT
     ROUND(cw.total_revenue / NULLIF(qr.quota, 0) * 100, 1)::float       AS attainment_pct,
     (cw.total_revenue + n.negotiation_revenue)::float                    AS sales_forecast,
     (cw.total_revenue - qr.quota)::float                                 AS variance,
-    (cwm.mtd_revenue - qr.monthly_quota)::float                         AS monthly_variance,
+    (cwm.mtd_revenue - qr.monthly_quota)::float                          AS monthly_variance,
     CASE WHEN cw.total_revenue >= qr.quota THEN 'Excess' ELSE 'Deficit' END
                                                                          AS excess_deficit,
     CASE WHEN cwm.mtd_revenue >= qr.monthly_quota THEN 'Excess' ELSE 'Deficit' END
@@ -84,41 +81,34 @@ FROM closed_won cw, closed_won_mtd cwm, open_pipe op, quota_row qr, negotiation 
 # Always returns exactly 3 rows — one per month in the selected quarter,
 # even if no revenue was closed in that month (revenue = 0).
 BD_REVENUE_BY_MONTH = """
-WITH quarter_range AS (
-    SELECT
-        make_date(:year, (:quarter - 1) * 3 + 1, 1)::timestamptz AS q_start,
-        (make_date(:year, (:quarter - 1) * 3 + 1, 1)
-            + INTERVAL '3 months')::timestamptz                   AS q_end
-),
-months AS (
+WITH months AS (
     SELECT generate_series(
-        (:quarter - 1) * 3 + 1,
-        (:quarter - 1) * 3 + 3
-    ) AS month_num
+        make_date(:year, (:quarter - 1) * 3 + 1, 1)::timestamptz,
+        (make_date(:year, (:quarter - 1) * 3 + 3, 1))::timestamptz,
+        INTERVAL '1 month'
+    ) AS month_start
 ),
-closed_by_month AS (
+contract_deals AS (
     SELECT
-        EXTRACT(MONTH FROM d.closed_date)::int  AS month,
-        COALESCE(SUM(d.revenue), 0)::float      AS revenue
+        d.id,
+        d.revenue::float AS revenue,
+        date_trunc('month', GREATEST(COALESCE(d.start_date, d.closed_date, NOW()), make_date(:year, (:quarter - 1) * 3 + 1, 1)::timestamptz)) AS first_month_in_quarter
     FROM deal d
-    CROSS JOIN quarter_range qr
     WHERE d.bd_id     = :bd_id
-      AND d.is_closed = true
       AND d.stage_id  = (SELECT id FROM pipeline_stage WHERE name = 'Closed Won')
-      AND d.closed_date >= qr.q_start
-      AND d.closed_date <  qr.q_end
-    GROUP BY EXTRACT(MONTH FROM d.closed_date)
+      AND COALESCE(d.start_date, d.closed_date, NOW()) < (make_date(:year, (:quarter - 1) * 3 + 1, 1) + INTERVAL '3 months')::timestamptz
+      AND COALESCE(d.due_date, d.start_date, d.closed_date, NOW()) >= make_date(:year, (:quarter - 1) * 3 + 1, 1)::timestamptz
 )
 SELECT
-    m.month_num                                            AS month,
-    TO_CHAR(make_date(:year, m.month_num, 1), 'Mon')      AS month_name,
-    COALESCE(cbm.revenue, 0)::float                       AS revenue,
-    -- Monthly quota line reference for the bar chart
+    EXTRACT(MONTH FROM m.month_start)::int                               AS month,
+    TO_CHAR(m.month_start, 'Mon')                                        AS month_name,
+    COALESCE(SUM(CASE WHEN cd.first_month_in_quarter = m.month_start THEN cd.revenue ELSE 0 END), 0)::float AS revenue,
     (SELECT COALESCE(MAX(t.quota), 0) FROM target t
-     WHERE t.bd_id = :bd_id AND t.period_type = 'MONTHLY')::float  AS quota
+     WHERE t.bd_id = :bd_id AND t.period_type = 'MONTHLY')::float       AS quota
 FROM months m
-LEFT JOIN closed_by_month cbm ON cbm.month = m.month_num
-ORDER BY m.month_num;
+LEFT JOIN contract_deals cd ON TRUE
+GROUP BY m.month_start
+ORDER BY m.month_start;
 """
 
 # ── Pipeline by stage ─────────────────────────────────────────────────────────
@@ -155,47 +145,37 @@ ORDER BY d.revenue DESC NULLS LAST;
 # Closed Won revenue per service for this BD, this quarter.
 # Handles single-service deals and bundle deals (proportional via revenue_share_pct).
 BD_SERVICE_REVENUE = """
--- Closed Won revenue by service for this BD, filtered to the selected quarter.
--- Deals with no service or bundle assigned are grouped under the service name
--- they were created with. If service_id and bundle_id are both NULL the deal
--- still appears so it is never silently dropped from the pie chart.
-WITH quarter_range AS (
+WITH contract_deals AS (
     SELECT
-        make_date(:year, (:quarter - 1) * 3 + 1, 1)::timestamptz AS q_start,
-        (make_date(:year, (:quarter - 1) * 3 + 1, 1)
-            + INTERVAL '3 months')::timestamptz                   AS q_end
-),
-won_deals AS (
-    SELECT d.id, d.revenue, d.service_id, d.bundle_id
+        d.id,
+        d.revenue,
+        d.service_id,
+        d.bundle_id
     FROM deal d
-    CROSS JOIN quarter_range qr
-    WHERE d.bd_id        = :bd_id
-      AND d.is_closed    = true
-      AND d.stage_id     = (SELECT id FROM pipeline_stage WHERE name = 'Closed Won')
-      AND d.closed_date >= qr.q_start
-      AND d.closed_date <  qr.q_end
+    WHERE d.bd_id     = :bd_id
+      AND d.stage_id  = (SELECT id FROM pipeline_stage WHERE name = 'Closed Won')
+      AND COALESCE(d.start_date, d.closed_date, NOW()) < (make_date(:year, (:quarter - 1) * 3 + 1, 1) + INTERVAL '3 months')::timestamptz
+      AND COALESCE(d.due_date, d.start_date, d.closed_date, NOW()) >= make_date(:year, (:quarter - 1) * 3 + 1, 1)::timestamptz
 ),
 single_svc AS (
-    -- Single-service deals: attribute full revenue to the service
     SELECT
         s.name                 AS service_name,
-        SUM(wd.revenue)::float AS revenue,
-        COUNT(wd.id)::int      AS deal_count
-    FROM won_deals wd
-    JOIN service s ON s.id = wd.service_id
-    WHERE wd.service_id IS NOT NULL
+        SUM(cd.revenue)::float AS revenue,
+        COUNT(DISTINCT cd.id)::int AS deal_count
+    FROM contract_deals cd
+    JOIN service s ON s.id = cd.service_id
+    WHERE cd.service_id IS NOT NULL
     GROUP BY s.name
 ),
 bundle_svc AS (
-    -- Bundle deals: revenue attributed proportionally via revenue_share_pct
     SELECT
         s.name                                                AS service_name,
-        SUM(wd.revenue * bs.revenue_share_pct / 100.0)::float AS revenue,
-        COUNT(DISTINCT wd.id)::int                            AS deal_count
-    FROM won_deals wd
-    JOIN bundle_service bs ON bs.bundle_id = wd.bundle_id
+        SUM(cd.revenue * bs.revenue_share_pct / 100.0)::float AS revenue,
+        COUNT(DISTINCT cd.id)::int                            AS deal_count
+    FROM contract_deals cd
+    JOIN bundle_service bs ON bs.bundle_id = cd.bundle_id
     JOIN service s ON s.id = bs.service_id
-    WHERE wd.bundle_id IS NOT NULL
+    WHERE cd.bundle_id IS NOT NULL
     GROUP BY s.name
 ),
 combined AS (
@@ -203,15 +183,14 @@ combined AS (
     UNION ALL
     SELECT service_name, revenue, deal_count FROM bundle_svc
     UNION ALL
-    -- Deals where neither service_id nor bundle_id is set
     SELECT
         'Unassigned'           AS service_name,
-        SUM(wd.revenue)::float AS revenue,
-        COUNT(wd.id)::int      AS deal_count
-    FROM won_deals wd
-    WHERE wd.service_id IS NULL
-      AND wd.bundle_id  IS NULL
-    HAVING COUNT(wd.id) > 0
+        SUM(cd.revenue)::float AS revenue,
+        COUNT(DISTINCT cd.id)::int AS deal_count
+    FROM contract_deals cd
+    WHERE cd.service_id IS NULL
+      AND cd.bundle_id  IS NULL
+    HAVING COUNT(DISTINCT cd.id) > 0
 )
 SELECT
     service_name,
@@ -241,30 +220,25 @@ ORDER BY deal_count DESC;
 # Deals for this BD grouped by lead source.
 # Returns total deal count, won count, and won revenue per source (this quarter).
 BD_LEAD_SOURCE = """
-WITH quarter_range AS (
-    SELECT
-        make_date(:year, (:quarter - 1) * 3 + 1, 1)::timestamptz AS q_start,
-        (make_date(:year, (:quarter - 1) * 3 + 1, 1)
-            + INTERVAL '3 months')::timestamptz                   AS q_end
+WITH contract_deals AS (
+    SELECT d.id, d.lead_source, d.stage_id, d.revenue
+    FROM deal d
+    WHERE d.bd_id = :bd_id
+      AND COALESCE(d.start_date, d.closed_date, NOW()) < (make_date(:year, (:quarter - 1) * 3 + 1, 1) + INTERVAL '3 months')::timestamptz
+      AND COALESCE(d.due_date, d.start_date, d.closed_date, NOW()) >= make_date(:year, (:quarter - 1) * 3 + 1, 1)::timestamptz
 )
 SELECT
-    INITCAP(d.lead_source::text)                                             AS lead_source,
-    COUNT(d.id)::int                                                         AS total_deals,
-    COUNT(CASE
-        WHEN d.is_closed = true
-         AND d.stage_id  = (SELECT id FROM pipeline_stage WHERE name = 'Closed Won')
-        THEN 1 END)::int                                                     AS won_deals,
+    INITCAP(cd.lead_source::text)                                              AS lead_source,
+    COUNT(DISTINCT cd.id)::int                                                 AS total_deals,
+    COUNT(DISTINCT CASE
+        WHEN cd.stage_id = (SELECT id FROM pipeline_stage WHERE name = 'Closed Won')
+        THEN cd.id END)::int                                                   AS won_deals,
     COALESCE(SUM(CASE
-        WHEN d.is_closed = true
-         AND d.stage_id  = (SELECT id FROM pipeline_stage WHERE name = 'Closed Won')
-         AND d.closed_date >= qr.q_start
-         AND d.closed_date <  qr.q_end
-        THEN d.revenue ELSE 0
-    END), 0)::float                                                          AS won_revenue
-FROM deal d
-CROSS JOIN quarter_range qr
-WHERE d.bd_id = :bd_id
-GROUP BY d.lead_source
+        WHEN cd.stage_id = (SELECT id FROM pipeline_stage WHERE name = 'Closed Won')
+        THEN cd.revenue ELSE 0
+    END), 0)::float                                                            AS won_revenue
+FROM contract_deals cd
+GROUP BY cd.lead_source
 ORDER BY won_revenue DESC;
 """
 

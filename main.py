@@ -19,7 +19,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import dashboard, reports
+from routers import dashboard, reports, team
 from scheduler import weekly_forecast_snapshot, weekly_deal_snapshot
 
 logging.basicConfig(
@@ -101,6 +101,7 @@ app.add_middleware(
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(dashboard.router)
 app.include_router(reports.router)
+app.include_router(team.router)
 
 
 # ── Health check ──────────────────────────────────────────────────────────────

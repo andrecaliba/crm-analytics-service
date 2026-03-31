@@ -1,0 +1,84 @@
+# =============================================================================
+# Cross-Service Local Development Environment
+# =============================================================================
+# Spins up a shared Postgres + both services so you can test them together
+# without needing Railway or a remote database.
+#
+# Usage:
+#   1. Clone both repos side-by-side:
+#      projects/
+#        project-sales-crm/
+#        crm-analytics-service/
+#
+#   2. From THIS directory (crm-analytics-service/):
+#      docker compose -f docker-compose.dev.yml up --build
+#
+#   3. Services available at:
+#      - CRM:        http://localhost:8000
+#      - Analytics:   http://localhost:8001
+#      - Postgres:    localhost:5433 (mapped to avoid conflicts with local pg)
+#
+#   4. Run cross-service tests:
+#      python tests/test_cross_service.py
+#
+# Both services share the same DB and JWT_SECRET, mirroring production.
+# =============================================================================
+
+services:
+
+  # ── Shared PostgreSQL ──────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: sales_crm_dev
+      POSTGRES_USER: crm_user
+      POSTGRES_PASSWORD: local_dev_password
+    ports:
+      - "5433:5432"  # 5433 to avoid conflicts with local postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crm_user -d sales_crm_dev"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── Sales CRM (Zeandy's service) ──────────────────────────────────────────
+  # Adjust the build context path to match your directory structure.
+  # If both repos are siblings:  ../project-sales-crm
+  crm:
+    build:
+      context: ../project-sales-crm
+      dockerfile: Dockerfile  # adjust if your CRM uses a different Dockerfile name
+    environment:
+      DATABASE_URL: postgresql://crm_user:local_dev_password@db:5432/sales_crm_dev
+      JWT_SECRET: local-dev-secret-change-in-production-32chars
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    # If your CRM doesn't have a Dockerfile yet, comment out this service
+    # and run it manually:
+    #   DATABASE_URL=postgresql://crm_user:local_dev_password@localhost:5433/sales_crm_dev \
+    #   JWT_SECRET=local-dev-secret-change-in-production-32chars \
+    #   uvicorn main:app --reload --port 8000
+
+  # ── Analytics Service (Andre's service) ────────────────────────────────────
+  analytics:
+    build:
+      context: .
+      dockerfile: Dockerfile  # adjust if needed
+    environment:
+      DATABASE_URL: postgresql://crm_user:local_dev_password@db:5432/sales_crm_dev
+      JWT_SECRET: local-dev-secret-change-in-production-32chars
+    ports:
+      - "8001:8001"
+    depends_on:
+      db:
+        condition: service_healthy
+      crm:
+        condition: service_started
+
+volumes:
+  pgdata:

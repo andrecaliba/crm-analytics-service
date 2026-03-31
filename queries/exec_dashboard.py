@@ -20,10 +20,9 @@ closed_won AS (
     SELECT COALESCE(SUM(d.revenue), 0) AS total_revenue
     FROM deal d
     CROSS JOIN quarter_range qr
-    WHERE d.is_closed = true
-      AND d.stage_id  = (SELECT id FROM pipeline_stage WHERE name = 'Closed Won')
-      AND d.closed_date >= qr.q_start
-      AND d.closed_date <  qr.q_end
+    WHERE d.stage_id  = (SELECT id FROM pipeline_stage WHERE name = 'Closed Won')
+      AND COALESCE(d.start_date, d.closed_date, NOW()) < qr.q_end
+      AND COALESCE(d.due_date, d.start_date, d.closed_date, NOW()) >= qr.q_start
 ),
 team_quota AS (
     SELECT COALESCE(SUM(t.quota), 0) AS total_quota
@@ -33,7 +32,6 @@ team_quota AS (
       AND b.role = 'BD_REP'
 ),
 negotiation AS (
-    -- Forecast = Closed Won + Negotiation revenue (no weighting — stage % are labels only)
     SELECT COALESCE(SUM(d.revenue), 0) AS negotiation_revenue
     FROM deal d
     WHERE d.is_closed = false
@@ -55,35 +53,30 @@ WITH quarter_range AS (
         (make_date(:year, (:quarter - 1) * 3 + 1, 1)
             + INTERVAL '3 months')::timestamptz                   AS q_end
 ),
--- Isolate quarterly quota per BD to prevent row multiplication
 bd_quota AS (
     SELECT bd_id, COALESCE(MAX(quota), 0) AS quota
     FROM target
     WHERE period_type = 'QUARTERLY'
     GROUP BY bd_id
 ),
--- Aggregate deal metrics per BD independently
-bd_deals AS (
+bd_revenue AS (
     SELECT
         d.bd_id,
-        COALESCE(SUM(
-            CASE WHEN ps.name = 'Closed Won'
-                 AND d.closed_date >= qr.q_start
-                 AND d.closed_date <  qr.q_end
-                 THEN d.revenue ELSE 0 END
-        ), 0)                                                          AS revenue,
-        COUNT(CASE WHEN ps.name = 'Closed Won'
-                   AND d.closed_date >= qr.q_start
-                   AND d.closed_date <  qr.q_end
-                   THEN 1 END)                                         AS won_count,
-        COUNT(CASE WHEN d.is_closed = true
-                   AND d.closed_date >= qr.q_start
-                   AND d.closed_date <  qr.q_end
-                   THEN 1 END)                                         AS closed_count
+        COALESCE(SUM(d.revenue), 0) AS revenue
+    FROM deal d
+    CROSS JOIN quarter_range qr
+    WHERE COALESCE(d.start_date, d.closed_date, NOW()) < qr.q_end
+      AND COALESCE(d.due_date, d.start_date, d.closed_date, NOW()) >= qr.q_start
+      AND d.stage_id = (SELECT id FROM pipeline_stage WHERE name = 'Closed Won')
+    GROUP BY d.bd_id
+),
+bd_closures AS (
+    SELECT
+        d.bd_id,
+        COUNT(CASE WHEN ps.name = 'Closed Won' THEN 1 END) AS won_count,
+        COUNT(CASE WHEN d.is_closed = true THEN 1 END)     AS closed_count
     FROM deal d
     JOIN pipeline_stage ps ON ps.id = d.stage_id
-    CROSS JOIN quarter_range qr
-    WHERE d.bd_id IS NOT NULL
     GROUP BY d.bd_id
 )
 SELECT
@@ -91,20 +84,21 @@ SELECT
     b.first_name,
     b.last_name,
     b.role,
-    COALESCE(bd.revenue, 0)::float                                         AS revenue,
+    COALESCE(br.revenue, 0)::float                                         AS revenue,
     COALESCE(q.quota, 0)::float                                            AS quota,
     ROUND(
-        COALESCE(bd.revenue, 0) / NULLIF(COALESCE(q.quota, 0), 0) * 100, 1
+        COALESCE(br.revenue, 0) / NULLIF(COALESCE(q.quota, 0), 0) * 100, 1
     )::float                                                               AS attainment_pct,
     ROUND(
-        100.0 * COALESCE(bd.won_count, 0)
-        / NULLIF(COALESCE(bd.closed_count, 0), 0), 1
+        100.0 * COALESCE(bc.won_count, 0)
+        / NULLIF(COALESCE(bc.closed_count, 0), 0), 1
     )::float                                                               AS win_rate,
     RANK() OVER (
-        ORDER BY COALESCE(bd.revenue, 0) DESC
+        ORDER BY COALESCE(br.revenue, 0) DESC
     )::int                                                                 AS rank
 FROM bd b
-LEFT JOIN bd_deals bd ON bd.bd_id = b.id
+LEFT JOIN bd_revenue br ON br.bd_id = b.id
+LEFT JOIN bd_closures bc ON bc.bd_id = b.id
 LEFT JOIN bd_quota  q  ON q.bd_id  = b.id
 WHERE b.role = 'BD_REP'
 ORDER BY revenue DESC;
@@ -151,16 +145,15 @@ WITH quarter_range AS (
             + INTERVAL '3 months')::timestamptz                   AS q_end
 )
 SELECT
-    c.account_type::text                       AS account_type,
-    COUNT(d.id)::int                           AS deal_count,
-    COALESCE(SUM(d.revenue), 0)::float         AS revenue
+    c.account_type::text                        AS account_type,
+    COUNT(DISTINCT d.id)::int                   AS deal_count,
+    COALESCE(SUM(d.revenue), 0)::float          AS revenue
 FROM deal d
 JOIN client c ON c.id = d.client_id
 CROSS JOIN quarter_range qr
-WHERE d.is_closed = true
-  AND d.stage_id  = (SELECT id FROM pipeline_stage WHERE name = 'Closed Won')
-  AND d.closed_date >= qr.q_start
-  AND d.closed_date <  qr.q_end
+WHERE d.stage_id = (SELECT id FROM pipeline_stage WHERE name = 'Closed Won')
+  AND COALESCE(d.start_date, d.closed_date, NOW()) < qr.q_end
+  AND COALESCE(d.due_date, d.start_date, d.closed_date, NOW()) >= qr.q_start
 GROUP BY c.account_type
 ORDER BY revenue DESC;
 """
@@ -174,17 +167,16 @@ WITH quarter_range AS (
             + INTERVAL '3 months')::timestamptz                   AS q_end
 )
 SELECT
-    COALESCE(s.name, b.name, 'Unknown')        AS service_name,
-    COUNT(d.id)::int                           AS deal_count,
-    COALESCE(SUM(d.revenue), 0)::float         AS revenue
+    COALESCE(s.name, b.name, 'Unknown')         AS service_name,
+    COUNT(DISTINCT d.id)::int                   AS deal_count,
+    COALESCE(SUM(d.revenue), 0)::float          AS revenue
 FROM deal d
 LEFT JOIN service s ON s.id = d.service_id
 LEFT JOIN bundle  b ON b.id = d.bundle_id
 CROSS JOIN quarter_range qr
-WHERE d.is_closed = true
-  AND d.stage_id  = (SELECT id FROM pipeline_stage WHERE name = 'Closed Won')
-  AND d.closed_date >= qr.q_start
-  AND d.closed_date <  qr.q_end
+WHERE d.stage_id = (SELECT id FROM pipeline_stage WHERE name = 'Closed Won')
+  AND COALESCE(d.start_date, d.closed_date, NOW()) < qr.q_end
+  AND COALESCE(d.due_date, d.start_date, d.closed_date, NOW()) >= qr.q_start
 GROUP BY COALESCE(s.name, b.name, 'Unknown')
 ORDER BY revenue DESC;
 """
