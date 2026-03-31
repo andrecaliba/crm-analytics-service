@@ -236,8 +236,7 @@ def loss_analysis(
     bd_id: Optional[str] = Query(None, description="Optional BD filter"),
     format: str = Query("json"),
     db: Session = Depends(get_db),
-    user: dict = Depends(get_current_user),
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user)
 ):
     params = {"year": year, "quarter": quarter}
 
@@ -284,8 +283,7 @@ def sales_cycle(
     bd_id: Optional[str] = Query(None, description="Optional BD filter"),
     format: str = Query("json"),
     db: Session = Depends(get_db),
-    user: dict = Depends(get_current_user),
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user)
 ):
     params = {"year": year, "quarter": quarter}
 
@@ -329,8 +327,7 @@ def win_rate(
     bd_id: Optional[str] = Query(None, description="Optional BD filter"),
     format: str = Query("json"),
     db: Session = Depends(get_db),
-    user: dict = Depends(get_current_user),
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user)
 ):
     params = {"year": year, "quarter": quarter}
 
