@@ -4,6 +4,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from io import BytesIO
+from typing import Optional
 import openpyxl
 
 from db import get_db
@@ -15,6 +16,11 @@ from queries.reports import (
     SALES_CYCLE_BY_STAGE, SALES_CYCLE_TOTAL,
     WIN_RATE_BY_LEAD_SOURCE, WIN_RATE_BY_SERVICE,
     WIN_RATE_BY_INDUSTRY, WIN_RATE_OVERALL,
+    PIPELINE_BY_BD, PIPELINE_BY_SERVICE, PIPELINE_BY_ACCOUNT_TYPE,
+    PIPELINE_LEAD_SOURCE, PIPELINE_STAGE_TOTALS,
+    GROWTH_BY_MONTH, GROWTH_BY_QUARTER, GROWTH_BY_YEAR,
+    SERVICE_PERFORMANCE,
+    BD_LIST,
 )
 
 router = APIRouter(prefix="/api/analytics/reports", tags=["Reports"])
@@ -105,7 +111,6 @@ def _to_excel(sheets: dict, filename: str) -> StreamingResponse:
         ws.append(headers)
         for row in rows:
             ws.append([row.get(h) for h in headers])
-
     buf = BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -163,6 +168,7 @@ def pipeline_report(
     return {
         "report":               "pipeline",
         "period":               f"Q{quarter} {year}",
+        "bd_id":                bd_id,
         "stages":               stages,
         "total_deals":          totals["total_deals"],
         "total_pipeline_value": totals["total_pipeline_value"],
@@ -206,10 +212,8 @@ def quota_report(
     team_attainment = round(
         team_actual / team_quota * 100 if team_quota else 0, 1
     )
-
     if format == "xlsx":
         return _to_excel({"Quota": members}, f"quota-Q{quarter}-{year}")
-
     return {
         "report":              "quota",
         "period":              f"Q{quarter} {year}",
@@ -232,6 +236,7 @@ def loss_analysis(
     bd_id: Optional[str] = Query(None, description="Optional BD filter"),
     format: str = Query("json"),
     db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
     user: dict = Depends(get_current_user),
 ):
     params = {"year": year, "quarter": quarter}
@@ -256,18 +261,14 @@ def loss_analysis(
     by_stage = [dict(r) for r in db.execute(text(LOSS_BY_STAGE), params).mappings()]
 
     if format == "xlsx":
-        return _to_excel(
-            {"By Stage": by_stage, "Lost Deals": deals},
-            f"loss-analysis-Q{quarter}-{year}",
-        )
-
+        return _to_excel({"By Stage": by_stage, "Lost Deals": deals}, f"loss-analysis-Q{quarter}-{year}")
     return {
-        "report":            "loss_analysis",
-        "period":            f"Q{quarter} {year}",
-        "total_lost_deals":  totals["total_lost_deals"],
-        "total_lost_value":  totals["total_lost_value"],
-        "by_stage":          by_stage,
-        "deals":             deals,
+        "report":           "loss_analysis",
+        "period":           f"Q{quarter} {year}",
+        "total_lost_deals": totals["total_lost_deals"],
+        "total_lost_value": totals["total_lost_value"],
+        "by_stage":         by_stage,
+        "deals":            deals,
     }
 
 
@@ -283,6 +284,7 @@ def sales_cycle(
     bd_id: Optional[str] = Query(None, description="Optional BD filter"),
     format: str = Query("json"),
     db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
     user: dict = Depends(get_current_user),
 ):
     params = {"year": year, "quarter": quarter}
@@ -305,14 +307,13 @@ def sales_cycle(
 
     if format == "xlsx":
         return _to_excel({"Sales Cycle": by_stage}, f"sales-cycle-Q{quarter}-{year}")
-
     return {
-        "report":                "sales_cycle",
-        "period":                f"Q{quarter} {year}",
-        "avg_total_cycle_days":  total["avg_total_cycle_days"],
-        "max_cycle_days":        total["max_cycle_days"],
-        "sample_size":           total["sample_size"],
-        "by_stage":              by_stage,
+        "report":               "sales_cycle",
+        "period":               f"Q{quarter} {year}",
+        "avg_total_cycle_days": total["avg_total_cycle_days"],
+        "max_cycle_days":       total["max_cycle_days"],
+        "sample_size":          total["sample_size"],
+        "by_stage":             by_stage,
     }
 
 
@@ -328,6 +329,7 @@ def win_rate(
     bd_id: Optional[str] = Query(None, description="Optional BD filter"),
     format: str = Query("json"),
     db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
     user: dict = Depends(get_current_user),
 ):
     params = {"year": year, "quarter": quarter}
@@ -350,19 +352,65 @@ def win_rate(
 
     if format == "xlsx":
         return _to_excel(
-            {
-                "By Lead Source": by_lead_source,
-                "By Service":     by_service,
-                "By Industry":    by_industry,
-            },
+            {"By Lead Source": by_lead_source, "By Service": by_service, "By Industry": by_industry},
             f"win-rate-Q{quarter}-{year}",
         )
-
     return {
-        "report":          "win_rate",
-        "period":          f"Q{quarter} {year}",
+        "report":           "win_rate",
+        "period":           f"Q{quarter} {year}",
         "overall_win_rate": overall["overall_win_rate"],
-        "by_lead_source":  by_lead_source,
-        "by_service":      by_service,
-        "by_industry":     by_industry,
+        "by_lead_source":   by_lead_source,
+        "by_service":       by_service,
+        "by_industry":      by_industry,
+    }
+
+
+# ── Growth sandbox ────────────────────────────────────────────────────────────
+
+@router.get(
+    "/growth",
+    summary="Growth sandbox — revenue trend by month / quarter / year",
+    description="""
+Returns a revenue series for the given year and granularity.
+Use bd_id to scope to a single rep; omit for the whole team.
+Call this endpoint multiple times with different params to populate
+side-by-side comparison series on the frontend.
+""",
+)
+def growth(
+    year: int = Query(..., description="Reference year, e.g. 2026"),
+    granularity: str = Query("quarter", description="'month', 'quarter', or 'year'"),
+    bd_id: Optional[str] = Query(None, description="BD UUID; omit for all BDs"),
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    params = {"year": year, "bd_id": bd_id}
+    query_map = {"month": GROWTH_BY_MONTH, "quarter": GROWTH_BY_QUARTER, "year": GROWTH_BY_YEAR}
+    sql = query_map.get(granularity, GROWTH_BY_QUARTER)
+    series = [dict(r) for r in db.execute(text(sql), params).mappings()]
+    return {
+        "year":        year,
+        "granularity": granularity,
+        "bd_id":       bd_id,
+        "series":      series,
+    }
+
+# ── Service performance ───────────────────────────────────────────────────────
+
+@router.get("/service-performance", summary="Service performance — revenue, win rate, avg deal size per service")
+def service_performance(
+    year: int = Query(...),
+    quarter: int = Query(..., ge=1, le=4),
+    format: str = Query("json"),
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    params = {"year": year, "quarter": quarter}
+    services = [dict(r) for r in db.execute(text(SERVICE_PERFORMANCE), params).mappings()]
+    if format == "xlsx":
+        return _to_excel({"Service Performance": services}, f"service-performance-Q{quarter}-{year}")
+    return {
+        "report":  "service_performance",
+        "period":  f"Q{quarter} {year}",
+        "services": services,
     }
