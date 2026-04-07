@@ -121,7 +121,7 @@ def run_tests():
 
     if BD_ID:
         status, data = _request(f"/api/analytics/dashboard/bd?year={YEAR}&quarter={QUARTER}&bd_id={BD_ID}")
-        check(f"GET /dashboard/bd → 200 with all 10 keys", status, data,
+        check(f"GET /dashboard/bd → 200 with all 11 keys", status, data,
               has_key("total_revenue"),
               has_key("open_pipeline"),
               has_key("quota"),
@@ -132,6 +132,8 @@ def run_tests():
               is_list("revenue_by_month"),
               is_list("pipeline_by_stage"),
               is_list("open_deals"),
+              is_list("service_revenue"),
+              is_list("bundle_revenue"),
         )
         if data:
             check("  pipeline_by_stage has 7 stages", 200, data,
@@ -202,6 +204,28 @@ def run_tests():
     check("GET /reports/win-rate → 200", status, data,
           has_key("overall_win_rate"),
           is_list("by_lead_source"), is_list("by_service"), is_list("by_industry"))
+
+    status, data = _request(
+        f"/api/analytics/reports/growth-comparison"
+        f"?leftMode=year&leftYear={YEAR}&leftQuarter={QUARTER}&leftQuarters=1,2"
+        f"&rightMode=quarter&rightYear={YEAR}&rightQuarter={QUARTER}&rightYears={YEAR}"
+    )
+    check("GET /reports/growth-comparison → 200", status, data,
+          has_key("left"), has_key("right"))
+    if data:
+        check("  growth comparison snapshots have key metrics", 200, data,
+              (lambda d: all(k in d.get("left", {}) for k in ("actual", "quota", "pipelineValue", "serviceRevenue")),
+               "left snapshot missing expected keys"),
+              (lambda d: all(k in d.get("right", {}) for k in ("actual", "quota", "pipelineValue", "serviceRevenue")),
+               "right snapshot missing expected keys"))
+
+    status, data = _request(f"/api/analytics/reports/collections-overview?year={YEAR}&quarter={QUARTER}")
+    check("GET /reports/collections-overview → 200", status, data,
+          has_key("summary"), is_list("monthlyTrend"), is_list("byBd"), is_list("byAccount"), is_list("overdueAccounts"))
+    if data:
+        check("  collections summary has revenue keys", 200, data,
+              (lambda d: all(k in d.get("summary", {}) for k in ("bookedRevenue", "expectedRevenue", "collectedRevenue", "overdueRevenue")),
+               "summary missing expected collections keys"))
 
     # ── Excel exports ─────────────────────────────────────────────────────────
     print(f"\n{BOLD}Excel exports (checking 200 + correct content-type){RESET}")

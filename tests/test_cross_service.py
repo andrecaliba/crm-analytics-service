@@ -183,6 +183,8 @@ def main():
         if status == 200 and data:
             for key in ["total_revenue", "open_pipeline", "quota", "attainment_pct"]:
                 check(f"  BD dashboard has '{key}'", key in data)
+            check("  BD dashboard has 'service_revenue'", "service_revenue" in data and isinstance(data["service_revenue"], list))
+            check("  BD dashboard has 'bundle_revenue'", "bundle_revenue" in data and isinstance(data["bundle_revenue"], list))
     else:
         print(f"\n{BOLD}4. BD Dashboard{RESET}")
         print(f"  {YELLOW}⚠ Skipped (no TEST_BD_ID set){RESET}")

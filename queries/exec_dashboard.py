@@ -21,14 +21,18 @@ closed_won AS (
     FROM deal d
     CROSS JOIN quarter_range qr
     WHERE d.stage_id  = (SELECT id FROM pipeline_stage WHERE name = 'Closed Won')
+      AND COALESCE(d.contract_status::text, 'ACTIVE') <> 'TERMINATED'
       AND COALESCE(d.start_date, d.closed_date, NOW()) < qr.q_end
-      AND COALESCE(d.due_date, d.start_date, d.closed_date, NOW()) >= qr.q_start
+      AND COALESCE(d.terminated_at, d.due_date, d.start_date, d.closed_date, NOW()) >= qr.q_start
 ),
 team_quota AS (
     SELECT COALESCE(SUM(t.quota), 0) AS total_quota
     FROM target t
+    JOIN date_dimension dd ON dd.id = t.date_id
     JOIN bd b ON b.id = t.bd_id
     WHERE t.period_type = 'QUARTERLY'
+      AND dd.year = :year
+      AND dd.quarter = :quarter
       AND b.role = 'BD_REP'
 ),
 negotiation AS (
@@ -55,8 +59,11 @@ WITH quarter_range AS (
 ),
 bd_quota AS (
     SELECT bd_id, COALESCE(MAX(quota), 0) AS quota
-    FROM target
+    FROM target t
+    JOIN date_dimension dd ON dd.id = t.date_id
     WHERE period_type = 'QUARTERLY'
+      AND dd.year = :year
+      AND dd.quarter = :quarter
     GROUP BY bd_id
 ),
 bd_revenue AS (
@@ -66,7 +73,8 @@ bd_revenue AS (
     FROM deal d
     CROSS JOIN quarter_range qr
     WHERE COALESCE(d.start_date, d.closed_date, NOW()) < qr.q_end
-      AND COALESCE(d.due_date, d.start_date, d.closed_date, NOW()) >= qr.q_start
+      AND COALESCE(d.contract_status::text, 'ACTIVE') <> 'TERMINATED'
+      AND COALESCE(d.terminated_at, d.due_date, d.start_date, d.closed_date, NOW()) >= qr.q_start
       AND d.stage_id = (SELECT id FROM pipeline_stage WHERE name = 'Closed Won')
     GROUP BY d.bd_id
 ),
@@ -152,8 +160,9 @@ FROM deal d
 JOIN client c ON c.id = d.client_id
 CROSS JOIN quarter_range qr
 WHERE d.stage_id = (SELECT id FROM pipeline_stage WHERE name = 'Closed Won')
+  AND COALESCE(d.contract_status::text, 'ACTIVE') <> 'TERMINATED'
   AND COALESCE(d.start_date, d.closed_date, NOW()) < qr.q_end
-  AND COALESCE(d.due_date, d.start_date, d.closed_date, NOW()) >= qr.q_start
+  AND COALESCE(d.terminated_at, d.due_date, d.start_date, d.closed_date, NOW()) >= qr.q_start
 GROUP BY c.account_type
 ORDER BY revenue DESC;
 """
@@ -175,8 +184,9 @@ LEFT JOIN service s ON s.id = d.service_id
 LEFT JOIN bundle  b ON b.id = d.bundle_id
 CROSS JOIN quarter_range qr
 WHERE d.stage_id = (SELECT id FROM pipeline_stage WHERE name = 'Closed Won')
+  AND COALESCE(d.contract_status::text, 'ACTIVE') <> 'TERMINATED'
   AND COALESCE(d.start_date, d.closed_date, NOW()) < qr.q_end
-  AND COALESCE(d.due_date, d.start_date, d.closed_date, NOW()) >= qr.q_start
+  AND COALESCE(d.terminated_at, d.due_date, d.start_date, d.closed_date, NOW()) >= qr.q_start
 GROUP BY COALESCE(s.name, b.name, 'Unknown')
 ORDER BY revenue DESC;
 """

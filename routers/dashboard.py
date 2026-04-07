@@ -10,6 +10,7 @@ from queries.bd_dashboard import (
     BD_PIPELINE_BY_STAGE,
     BD_OPEN_DEALS,
     BD_SERVICE_REVENUE,
+    BD_BUNDLE_REVENUE,
     BD_ACCOUNT_TYPE_PIPELINE,
     BD_LEAD_SOURCE,
 )
@@ -87,7 +88,8 @@ Returns all metrics needed for an individual BD rep's performance dashboard.
 - `revenue_by_month` — Monthly contract revenue + quota reference for bar chart (3 rows per quarter)
 - `pipeline_by_stage` — Open deal count + value per stage (all 7 stages, 0 for empty)
 - `open_deals` — Open deals ordered by revenue desc
-- `service_revenue` — Contract revenue per service recognized within the selected quarter
+- `service_revenue` — Contract revenue per service recognized within the selected quarter, including services attributed from bundle deals
+- `bundle_revenue` — Contract revenue per bundle recognized within the selected quarter
 - `account_type_pipeline` — Open deal count + value per client account type
 - `lead_source` — Deal count, won count, and recognized contract revenue per lead source
 - `follow_up` — Overdue action plans, overdue follow-ups, upcoming action plans
@@ -122,6 +124,9 @@ def bd_dashboard(
     service_revenue = [
         dict(r) for r in db.execute(text(BD_SERVICE_REVENUE), params).mappings()
     ]
+    bundle_revenue = [
+        dict(r) for r in db.execute(text(BD_BUNDLE_REVENUE), params).mappings()
+    ]
     account_type_pipeline = [
         dict(r) for r in db.execute(text(BD_ACCOUNT_TYPE_PIPELINE), params).mappings()
     ]
@@ -143,6 +148,7 @@ def bd_dashboard(
         "pipeline_by_stage":     pipeline_by_stage,
         "open_deals":            open_deals,
         "service_revenue":       service_revenue,
+        "bundle_revenue":        bundle_revenue,
         "account_type_pipeline": account_type_pipeline,
         "lead_source":           lead_source,
         "follow_up":             follow_up,

@@ -38,10 +38,13 @@ WITH quarter_range AS (
             + INTERVAL '3 months')::timestamptz                   AS q_end
 ),
 bd_quota AS (
-    SELECT bd_id, COALESCE(MAX(quota), 0) AS quota
-    FROM target
+    SELECT t.bd_id, COALESCE(MAX(t.quota), 0) AS quota
+    FROM target t
+    JOIN date_dimension dd ON dd.id = t.date_id
     WHERE period_type = 'QUARTERLY'
-    GROUP BY bd_id
+      AND dd.year = :year
+      AND dd.quarter = :quarter
+    GROUP BY t.bd_id
 ),
 bd_actual AS (
     SELECT
@@ -88,8 +91,12 @@ SELECT
     (
         SELECT COALESCE(SUM(t.quota), 0)
         FROM target t
+        JOIN date_dimension dd ON dd.id = t.date_id
         JOIN bd b ON b.id = t.bd_id
-        WHERE t.period_type = 'QUARTERLY' AND b.role = 'BD_REP'
+        WHERE t.period_type = 'QUARTERLY'
+          AND dd.year = :year
+          AND dd.quarter = :quarter
+          AND b.role = 'BD_REP'
     )::float AS team_quota,
     (
         SELECT COALESCE(SUM(d.revenue), 0)
@@ -590,3 +597,4 @@ FROM bd
 WHERE is_active = true
 ORDER BY first_name;
 """
+

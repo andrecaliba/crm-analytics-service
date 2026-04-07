@@ -30,8 +30,9 @@ closed_won AS (
     CROSS JOIN quarter_range qr
     WHERE d.bd_id     = :bd_id
       AND d.stage_id  = (SELECT id FROM pipeline_stage WHERE name = 'Closed Won')
+      AND COALESCE(d.contract_status::text, 'ACTIVE') <> 'TERMINATED'
       AND COALESCE(d.start_date, d.closed_date, NOW()) < qr.q_end
-      AND COALESCE(d.due_date, d.start_date, d.closed_date, NOW()) >= qr.q_start
+      AND COALESCE(d.terminated_at, d.due_date, d.start_date, d.closed_date, NOW()) >= qr.q_start
 ),
 closed_won_mtd AS (
     SELECT COALESCE(SUM(d.revenue), 0) AS mtd_revenue
@@ -39,8 +40,9 @@ closed_won_mtd AS (
     CROSS JOIN month_range mr
     WHERE d.bd_id     = :bd_id
       AND d.stage_id  = (SELECT id FROM pipeline_stage WHERE name = 'Closed Won')
+      AND COALESCE(d.contract_status::text, 'ACTIVE') <> 'TERMINATED'
       AND COALESCE(d.start_date, d.closed_date, NOW()) < mr.m_end
-      AND COALESCE(d.due_date, d.start_date, d.closed_date, NOW()) >= mr.m_start
+      AND COALESCE(d.terminated_at, d.due_date, d.start_date, d.closed_date, NOW()) >= mr.m_start
 ),
 open_pipe AS (
     SELECT COALESCE(SUM(d.revenue), 0) AS open_pipeline
@@ -79,7 +81,9 @@ FROM closed_won cw, closed_won_mtd cwm, open_pipe op, quota_row qr, negotiation 
 
 # ── Revenue by month (bar chart) ──────────────────────────────────────────────
 # Always returns exactly 3 rows — one per month in the selected quarter,
-# even if no revenue was closed in that month (revenue = 0).
+# even if no revenue was recognized in that month (revenue = 0).
+# Revenue is recognized monthly across every overlapping contract month,
+# not lumped into the contract start month.
 BD_REVENUE_BY_MONTH = """
 WITH months AS (
     SELECT generate_series(
@@ -91,18 +95,39 @@ WITH months AS (
 contract_deals AS (
     SELECT
         d.id,
-        d.revenue::float AS revenue,
-        date_trunc('month', GREATEST(COALESCE(d.start_date, d.closed_date, NOW()), make_date(:year, (:quarter - 1) * 3 + 1, 1)::timestamptz)) AS first_month_in_quarter
+        d.monthly_subscription::float AS monthly_revenue,
+        date_trunc(
+            'month',
+            GREATEST(
+                COALESCE(d.start_date, d.closed_date, NOW()),
+                make_date(:year, (:quarter - 1) * 3 + 1, 1)::timestamptz
+            )
+        ) AS first_month_in_quarter,
+        date_trunc(
+            'month',
+            LEAST(
+                COALESCE(d.terminated_at, d.due_date, d.start_date, d.closed_date, NOW()),
+                (make_date(:year, (:quarter - 1) * 3 + 3, 1) + INTERVAL '1 month - 1 day')::timestamptz
+            )
+        ) AS last_month_in_quarter
     FROM deal d
     WHERE d.bd_id     = :bd_id
       AND d.stage_id  = (SELECT id FROM pipeline_stage WHERE name = 'Closed Won')
+      AND COALESCE(d.contract_status::text, 'ACTIVE') <> 'TERMINATED'
       AND COALESCE(d.start_date, d.closed_date, NOW()) < (make_date(:year, (:quarter - 1) * 3 + 1, 1) + INTERVAL '3 months')::timestamptz
-      AND COALESCE(d.due_date, d.start_date, d.closed_date, NOW()) >= make_date(:year, (:quarter - 1) * 3 + 1, 1)::timestamptz
+      AND COALESCE(d.terminated_at, d.due_date, d.start_date, d.closed_date, NOW()) >= make_date(:year, (:quarter - 1) * 3 + 1, 1)::timestamptz
 )
 SELECT
     EXTRACT(MONTH FROM m.month_start)::int                               AS month,
     TO_CHAR(m.month_start, 'Mon')                                        AS month_name,
-    COALESCE(SUM(CASE WHEN cd.first_month_in_quarter = m.month_start THEN cd.revenue ELSE 0 END), 0)::float AS revenue,
+    COALESCE(SUM(
+        CASE
+            WHEN m.month_start >= cd.first_month_in_quarter
+             AND m.month_start <= cd.last_month_in_quarter
+            THEN cd.monthly_revenue
+            ELSE 0
+        END
+    ), 0)::float AS revenue,
     (SELECT COALESCE(MAX(t.quota), 0) FROM target t
      WHERE t.bd_id = :bd_id AND t.period_type = 'MONTHLY')::float       AS quota
 FROM months m
@@ -154,8 +179,9 @@ WITH contract_deals AS (
     FROM deal d
     WHERE d.bd_id     = :bd_id
       AND d.stage_id  = (SELECT id FROM pipeline_stage WHERE name = 'Closed Won')
+      AND COALESCE(d.contract_status::text, 'ACTIVE') <> 'TERMINATED'
       AND COALESCE(d.start_date, d.closed_date, NOW()) < (make_date(:year, (:quarter - 1) * 3 + 1, 1) + INTERVAL '3 months')::timestamptz
-      AND COALESCE(d.due_date, d.start_date, d.closed_date, NOW()) >= make_date(:year, (:quarter - 1) * 3 + 1, 1)::timestamptz
+      AND COALESCE(d.terminated_at, d.due_date, d.start_date, d.closed_date, NOW()) >= make_date(:year, (:quarter - 1) * 3 + 1, 1)::timestamptz
 ),
 single_svc AS (
     SELECT
@@ -201,6 +227,32 @@ GROUP BY service_name
 ORDER BY revenue DESC;
 """
 
+# ── Bundle revenue breakdown ─────────────────────────────────────────────────
+# Closed Won revenue per bundle for this BD, this quarter.
+BD_BUNDLE_REVENUE = """
+WITH contract_deals AS (
+    SELECT
+        d.id,
+        d.revenue,
+        d.bundle_id
+    FROM deal d
+    WHERE d.bd_id     = :bd_id
+      AND d.stage_id  = (SELECT id FROM pipeline_stage WHERE name = 'Closed Won')
+      AND d.bundle_id IS NOT NULL
+      AND COALESCE(d.contract_status::text, 'ACTIVE') <> 'TERMINATED'
+      AND COALESCE(d.start_date, d.closed_date, NOW()) < (make_date(:year, (:quarter - 1) * 3 + 1, 1) + INTERVAL '3 months')::timestamptz
+      AND COALESCE(d.terminated_at, d.due_date, d.start_date, d.closed_date, NOW()) >= make_date(:year, (:quarter - 1) * 3 + 1, 1)::timestamptz
+)
+SELECT
+    b.name                     AS bundle_name,
+    SUM(cd.revenue)::float     AS revenue,
+    COUNT(DISTINCT cd.id)::int AS deal_count
+FROM contract_deals cd
+JOIN bundle b ON b.id = cd.bundle_id
+GROUP BY b.name
+ORDER BY revenue DESC;
+"""
+
 # ── Account type breakdown on open pipeline ───────────────────────────────────
 # Count and value of open deals per client account type for this BD.
 BD_ACCOUNT_TYPE_PIPELINE = """
@@ -224,8 +276,9 @@ WITH contract_deals AS (
     SELECT d.id, d.lead_source, d.stage_id, d.revenue
     FROM deal d
     WHERE d.bd_id = :bd_id
+      AND COALESCE(d.contract_status::text, 'ACTIVE') <> 'TERMINATED'
       AND COALESCE(d.start_date, d.closed_date, NOW()) < (make_date(:year, (:quarter - 1) * 3 + 1, 1) + INTERVAL '3 months')::timestamptz
-      AND COALESCE(d.due_date, d.start_date, d.closed_date, NOW()) >= make_date(:year, (:quarter - 1) * 3 + 1, 1)::timestamptz
+      AND COALESCE(d.terminated_at, d.due_date, d.start_date, d.closed_date, NOW()) >= make_date(:year, (:quarter - 1) * 3 + 1, 1)::timestamptz
 )
 SELECT
     INITCAP(cd.lead_source::text)                                              AS lead_source,
