@@ -2,7 +2,7 @@
 Sales CRM Analytics Service
 ============================
 Separate Python FastAPI service for OLAP / analytics.
-Reads from the shared PostgreSQL database (same DB as Zeandy's CRM).
+Reads from the shared PostgreSQL database (same DB as the CRM service).
 
 Run locally:
     uvicorn main:app --reload --port 8001
@@ -10,17 +10,19 @@ Run locally:
 Docs available at:
     http://localhost:8001/docs        (Swagger UI)
     http://localhost:8001/redoc       (ReDoc)
+
+Snapshot jobs (weekly_forecast_snapshot, weekly_deal_snapshot) are now
+orchestrated by Apache Airflow 3.x — see dags/ directory.
+APScheduler has been removed.
 """
 
 import logging
 from contextlib import asynccontextmanager
 
-from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from routers import dashboard, reports, team
-from scheduler import weekly_forecast_snapshot, weekly_deal_snapshot
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,36 +30,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-scheduler = BackgroundScheduler()
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # ── Startup ──────────────────────────────────────────────────────────────
-    scheduler.add_job(
-        weekly_forecast_snapshot,
-        trigger="cron",
-        day_of_week="sun",
-        hour=0,
-        minute=0,
-        id="forecast_snapshot",
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        weekly_deal_snapshot,
-        trigger="cron",
-        day_of_week="sun",
-        hour=0,
-        minute=30,
-        id="deal_snapshot",
-        replace_existing=True,
-    )
-    scheduler.start()
-    logger.info("Scheduler started — snapshot jobs registered (every Sunday)")
+    # Snapshot jobs are now managed by Airflow DAGs (dags/).
+    # Nothing to start or stop here for scheduling.
+    logger.info("Analytics service started — snapshot jobs managed by Airflow")
     yield
-    # ── Shutdown ─────────────────────────────────────────────────────────────
-    scheduler.shutdown(wait=False)
-    logger.info("Scheduler stopped")
+    logger.info("Analytics service stopped")
 
 
 app = FastAPI(
@@ -71,7 +51,7 @@ to the frontend dashboards and report exports.
 
 ### Authentication
 All endpoints require a `Bearer <JWT>` token in the `Authorization` header.
-Use the same token issued by Zeandy's `/api/auth/login` endpoint.
+Use the same token issued by the CRM service's `/api/auth/login` endpoint.
 
 ### Access Control
 - **BD_REP** — can only access their own BD dashboard (`/dashboard/bd?bd_id=<own id>`)
@@ -82,13 +62,19 @@ Use the same token issued by Zeandy's `/api/auth/login` endpoint.
 |-------|--------|-------------|
 | Dashboard | `/api/analytics/dashboard` | BD + Executive dashboard metrics |
 | Reports | `/api/analytics/reports` | Pipeline, quota, loss analysis, sales cycle, win rate |
+
+### Snapshot Jobs
+Weekly pipeline snapshots are scheduled via Apache Airflow 3.x.
+See `dags/` for DAG definitions. To trigger manually:
+    airflow dags trigger forecast_snapshot_dag
+    airflow dags trigger deal_snapshot_dag
 """,
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan,
 )
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
-# Allow Zeandy's frontend to call this API.
+# Allow the CRM frontend to call this API.
 # In production, replace "*" with the actual Railway frontend URL.
 app.add_middleware(
     CORSMiddleware,

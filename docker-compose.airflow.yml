@@ -1,0 +1,59 @@
+# =============================================================================
+# Airflow Local Development - crm-analytics-service
+# Uses airflow standalone (single container, no cross-service API issues)
+#
+# Usage:
+#   1. Drop old schema (first time or reset):
+#        psql -h localhost -U postgres -p 5433 -d sales-crm -c "DROP SCHEMA IF EXISTS airflow CASCADE;"
+#   2. Start: docker compose -f docker-compose.airflow.yml up -d
+#   3. UI at http://localhost:8080  (admin / changeme)
+#   4. Stop: docker compose -f docker-compose.airflow.yml down
+#   5. Full reset: docker compose -f docker-compose.airflow.yml down -v  + step 1
+# =============================================================================
+
+services:
+  airflow:
+    image: apache/airflow:3.1.8-python3.12
+    container_name: crm-airflow
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        pip install --quiet \
+          "sqlalchemy==2.0.36" \
+          "psycopg2-binary==2.9.10" \
+          "python-dotenv==1.0.1" \
+          "pandas==2.2.3" \
+          "pendulum>=3.2.0"
+        python /opt/analytics/scripts/create_airflow_schema.py
+        exec airflow standalone
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: "${AIRFLOW__DATABASE__SQL_ALCHEMY_CONN}"
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: "/opt/airflow/dags"
+      AIRFLOW__CORE__DEFAULT_TIMEZONE: "Asia/Manila"
+      DATABASE_URL: "postgresql://postgres:postgres@host.docker.internal:5433/sales-crm"
+      JWT_SECRET: "${JWT_SECRET}"
+      PYTHONPATH: "/opt/analytics"
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "true"
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS: "${AIRFLOW_WWW_USER_USERNAME:-admin}:${AIRFLOW_WWW_USER_PASSWORD:-changeme}"
+      AIRFLOW__CORE__FERNET_KEY: ""
+      AIRFLOW__CORE__INTERNAL_API_SECRET_KEY: "local-dev-internal-api-secret-32ch"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - .:/opt/analytics
+      - airflow-logs:/opt/airflow/logs
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+volumes:
+  airflow-logs:
+    driver: local
